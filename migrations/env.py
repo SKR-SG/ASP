@@ -3,12 +3,17 @@ import os
 from logging.config import fileConfig
 from sqlalchemy import engine_from_config, pool
 from alembic import context
+from dotenv import load_dotenv
 
 # Добавляем путь к корню проекта
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "C:\ACP")))
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-# Импортируем базу данных
+# Загружаем переменные окружения из .env файла
+load_dotenv()
+
+# Импортируем базу данных и модели
 from app.database import Base
+from app.models import User  # Импортируйте все модели, которые у вас есть
 
 # Берем метаданные из моделей
 target_metadata = Base.metadata
@@ -16,8 +21,8 @@ target_metadata = Base.metadata
 # Загружаем конфиг Alembic
 config = context.config
 
-import logging
-logging.basicConfig(level=logging.DEBUG)
+# Устанавливаем URL базы данных из переменной окружения
+config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL"))
 
 # Настройка логирования
 if config.config_file_name is not None:
