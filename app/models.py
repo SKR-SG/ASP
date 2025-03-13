@@ -1,6 +1,17 @@
-from sqlalchemy import Column, Integer, String, Float, Boolean, ForeignKey, Date
-from sqlalchemy.orm import relationship
-from app.database import Base
+import os
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, Date, DateTime
+from sqlalchemy.orm import relationship, sessionmaker, declarative_base
+from dotenv import load_dotenv
+
+# Загружаем переменные окружения
+load_dotenv()
+
+# Настройка подключения к БД
+DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:159753@localhost/acp_db")
+Base = declarative_base()
+engine = create_engine(DATABASE_URL)
+Session = sessionmaker(bind=engine)
+session = Session()
 
 class User(Base):
     __tablename__ = "users"
@@ -14,20 +25,39 @@ class User(Base):
 class Request(Base):
     __tablename__ = "requests"
 
-    id = Column(Integer, primary_key=True, index=True)  # Вн. номер
-    platform = Column(String, nullable=False)  # Площадка
-    load_date = Column(Date, nullable=False)  # Дата погрузки
-    origin = Column(String, nullable=False)  # Загрузка (город)
-    unload_date = Column(Date, nullable=False)  # Дата разгрузки
-    destination = Column(String, nullable=False)  # Выгрузка (город)
-    rate_factory = Column(Float, nullable=True)  # Ставка завода
-    rate_auction = Column(Float, nullable=True)  # Ставка аукциона
-    cargo_type = Column(String, nullable=False)  # Тип груза
-    weight_volume = Column(String, nullable=False)  # Вес / Объём
-    vehicle_type = Column(String, nullable=False)  # Тип ТС
-    load_unload_type = Column(String, nullable=False)  # Тип погр/разгр
-    logistician = Column(String, nullable=False)  # Логист (ФИО)
-    ati_price = Column(Float, nullable=True)  # Цена АТИ
-    is_published = Column(Boolean, default=False)  # Опубликована
+    id = Column(Integer, primary_key=True, index=True)
+    external_no = Column(String, unique=True, nullable=False)
+    loading_city_id = Column(Integer, nullable=False)
+    unloading_city_id = Column(Integer, nullable=False)
+    load_date = Column(DateTime, nullable=False)
+    unload_date = Column(DateTime, nullable=True)
+    weight = Column(Float, nullable=True)
+    volume = Column(Float, nullable=True)
+    logistician = Column(Integer, nullable=False)  # ID логиста
+    ati_price = Column(Float, nullable=True)  # Цена для АТИ
+    is_published = Column(Boolean, default=False)
+    is_auction = Column(Boolean, default=False)  # Флаг аукциона
     owner_id = Column(Integer, ForeignKey("users.id"))  # Владелец заявки
     owner = relationship("User")  # Связь с пользователем
+
+class Logist(Base):
+    __tablename__ = "logists"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String, unique=True, nullable=False)  # Имя логиста
+    contact_id = Column(Integer, nullable=False)  # ID логиста в ATI
+
+class DistributionRule(Base):
+    __tablename__ = "distribution_rules"
+
+    id = Column(Integer, primary_key=True)
+    loading_city_id = Column(Integer, nullable=True)  # None = любой город
+    unloading_city_id = Column(Integer, nullable=True)
+    logist_id = Column(Integer, nullable=False)  # ID логиста
+    margin_percent = Column(Float, nullable=True)  # Маржа в %
+    auction_margin_percent = Column(Float, nullable=True)  # Маржа для аукциона
+    cargo_name = Column(String, nullable=True)  # Название груза
+    auto_publish = Column(Boolean, default=False)  # Авторазмещение
+    publish_delay = Column(Integer, default=0)  # Задержка публикации
+
+# Создание таблицы в БД
+Base.metadata.create_all(engine)
