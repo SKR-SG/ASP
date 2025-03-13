@@ -13,10 +13,10 @@ load_dotenv()
 
 # Импортируем базу данных и модели
 from app.database import Base
-from app.models import User  # Импортируйте все модели, которые у вас есть
+from app.models import metadata  # Импортируем метаданные
 
 # Берем метаданные из моделей
-target_metadata = Base.metadata
+target_metadata = metadata
 
 # Загружаем конфиг Alembic
 config = context.config

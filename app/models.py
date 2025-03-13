@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, Date, DateTime
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, Date, DateTime, MetaData
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
 from dotenv import load_dotenv
 
@@ -8,7 +8,8 @@ load_dotenv()
 
 # Настройка подключения к БД
 DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:159753@localhost/acp_db")
-Base = declarative_base()
+metadata = MetaData()
+Base = declarative_base(metadata=metadata)
 engine = create_engine(DATABASE_URL)
 Session = sessionmaker(bind=engine)
 session = Session()
@@ -26,19 +27,23 @@ class Request(Base):
     __tablename__ = "requests"
 
     id = Column(Integer, primary_key=True, index=True)
+    platform = Column(String, nullable=False)  # Платформа ("TMS", "ATI" и т. д.)
     external_no = Column(String, unique=True, nullable=False)
-    loading_city_id = Column(Integer, nullable=False)
-    unloading_city_id = Column(Integer, nullable=False)
-    load_date = Column(DateTime, nullable=False)
-    unload_date = Column(DateTime, nullable=True)
-    weight = Column(Float, nullable=True)
-    volume = Column(Float, nullable=True)
-    logistician = Column(Integer, nullable=False)  # ID логиста
+    loading_city_id = Column(Integer, nullable=False)  # Город погрузки (ID)
+    load_date = Column(DateTime, nullable=False)  # Дата погрузки
+    unloading_city_id = Column(Integer, nullable=False)  # Город разгрузки (ID)
+    unload_date = Column(DateTime, nullable=True)  # Дата разгрузки
+    weight_volume = Column(String, nullable=True)  # Вес и объем в формате "20 т / 90 м³"
+    vehicle_type = Column(String, nullable=True)  # Тип ТС
+    loading_types = Column(String, nullable=True)  # Типы погрузки/разгрузки
+    order_type = Column(String, nullable=False)  # 🔹 Тип заявки: "ASSIGNED", "AUCTION", "FREE"
+    bid_price = Column(Float, nullable=True)  # 🔹 ставка завод либо последняя аукционная
+    comment = Column(String, nullable=True)  # Комментарий к заявке
+    cargo_name = Column(String, nullable=True)  # Наименование груза из правил распределения
+    logistician_id = Column(Integer, nullable=False)  # ID логиста
     ati_price = Column(Float, nullable=True)  # Цена для АТИ
-    is_published = Column(Boolean, default=False)
-    is_auction = Column(Boolean, default=False)  # Флаг аукциона
-    owner_id = Column(Integer, ForeignKey("users.id"))  # Владелец заявки
-    owner = relationship("User")  # Связь с пользователем
+    is_published = Column(Boolean, default=False)  # Опубликована ли заявка
+
 
 class Logist(Base):
     __tablename__ = "logists"
