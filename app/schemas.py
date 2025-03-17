@@ -1,6 +1,7 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 from datetime import date
+from datetime import datetime
 
 class UserCreate(BaseModel):
     username: str
@@ -16,23 +17,23 @@ class UserResponse(BaseModel):
     class Config:
         orm_mode = True
 
-class RequestCreate(BaseModel):
+class OrderCreate(BaseModel):
     platform: str
-    load_date: date
+    load_date: datetime
     origin: str
-    unload_date: date
+    unload_date: datetime
     destination: str
-    rate_factory: Optional[float] = None
-    rate_auction: Optional[float] = None
+    rate_factory: float
+    rate_auction: float
     cargo_type: str
     weight_volume: str
     vehicle_type: str
     load_unload_type: str
     logistician: str
-    ati_price: Optional[float] = None
-    is_published: bool = False
+    ati_price: float
+    is_published: bool
 
-class RequestResponse(RequestCreate):
+class OrderResponse(OrderCreate):
     id: int
     owner_id: int
 

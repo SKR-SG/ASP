@@ -3,7 +3,7 @@ import requests
 from dotenv import load_dotenv
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
-from app.models import Logist, Base  # Исправленный импорт
+from app.models import Logist, Order  # Исправленный импорт
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -21,6 +21,36 @@ HEADERS = {
     "Authorization": f"Bearer {ATI_API_TOKEN}",
     "Content-Type": "application/json"
 }
+
+def get_car_types():
+    """Получает словарь типов кузовов с ATI"""
+    url = f"{ATI_API_BASE_URL}/v1.0/dictionaries/carTypes"
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code == 200:
+        car_types = response.json()
+        return {item["Name"].lower(): item["TypeId"] for item in car_types}
+    print(f"❌ Ошибка запроса carTypes: {response.status_code}, {response.text}")
+    return {}
+
+def get_loading_types():
+    """Получает словарь способов загрузки с ATI"""
+    url = f"{ATI_API_BASE_URL}/v1.0/dictionaries/loadingTypes"
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code == 200:
+        loading_types = response.json()
+        return {item["Name"].lower(): item["Id"] for item in loading_types}
+    print(f"❌ Ошибка запроса loadingTypes: {response.status_code}, {response.text}")
+    return {}
+
+def get_unloading_types():
+    """Получает словарь способов разгрузки с ATI"""
+    url = f"{ATI_API_BASE_URL}/v1.0/dictionaries/unloadingTypes"
+    response = requests.get(url, headers=HEADERS)
+    if response.status_code == 200:
+        unloading_types = response.json()
+        return {item["Name"].lower(): item["Id"] for item in unloading_types}
+    print(f"❌ Ошибка запроса unloadingTypes: {response.status_code}, {response.text}")
+    return {}
 
 def get_city_id(city_name):
     """Получает ID города по названию через API ATI."""
@@ -72,31 +102,54 @@ def publish_cargo(cargo_data):
     """Публикует груз в ATI.SU."""
     url = f"{ATI_API_BASE_URL}/v2/cargos"
 
-    # Получаем ID городов загрузки и выгрузки
-    loading_city_id = get_city_id(cargo_data["loading_city"])
-    unloading_city_id = get_city_id(cargo_data["unloading_city"])
+    # Проверяем, все ли ID переданы
+    if not cargo_data["loading_city_id"] or not cargo_data["unloading_city_id"]:
+        return {"error": "Ошибка: не определены ID городов"}
 
-    if not loading_city_id or not unloading_city_id:
-        return {"error": "Ошибка определения ID города"}
+    if not cargo_data["logist_id"]:
+        return {"error": "Ошибка: не определен ID логиста"}
 
-    # Получаем ID логиста
-    logist_id = get_contact_id(cargo_data["logist"])
-    if logist_id is None:
-        return {"error": "Ошибка определения ID логиста"}
+    # 🆕 Исправленная передача `load_date`
+    load_dates = {
+        "type": "from-date",
+        "time": {
+            "type": "bounded",
+            "start": cargo_data["loading_dates"]["time"]["start"],
+            "end": cargo_data["loading_dates"]["time"]["end"],
+            "offset": "+00:00"
+        },
+        "first_date": cargo_data["loading_dates"]["first_date"],
+        "last_date": cargo_data["loading_dates"]["last_date"]
+    }
+
+    # 🆕 Исправленная передача `unload_date`
+    unload_dates = {
+        "first_date": cargo_data["unloading_dates"]["first_date"],
+        "last_date": cargo_data["unloading_dates"]["last_date"],
+        "time": {
+            "type": "bounded" if cargo_data["unloading_dates"]["time"]["start"] else "round-the-clock",
+            "start": cargo_data["unloading_dates"]["time"]["start"],
+            "end": cargo_data["unloading_dates"]["time"]["end"],
+            "offset": "+00:00"
+        }
+    } if cargo_data["unloading_dates"]["first_date"] else None  # Если нет даты, не передаем
+
+    # 🆕 Формируем структуру `truck`
+    truck_data = {
+        "load_type": "ftl",
+        "body_types": cargo_data["body_types"],
+        "body_loading": {"types": cargo_data["body_loading"], "is_all_required": True},
+        "body_unloading": {"types": cargo_data["body_unloading"], "is_all_required": True}
+    }
 
     # Формируем запрос на публикацию
     payload = {
         "cargo_application": {
-            "external_id": str(cargo_data["external_id"]),
             "route": {
                 "loading": {
-                    "city_id": loading_city_id,
+                    "city_id": cargo_data["loading_city_id"],
                     "address": cargo_data["loading_address"],
-                    "dates": {
-                        "type": "ready",
-                        "time": {"type": "round-the-clock"},
-                        "is_available_tomorrow": False
-                    },
+                    "dates": load_dates,  # 🆕 Передаем исправленные даты
                     "cargos": [
                         {
                             "id": 1,
@@ -107,31 +160,16 @@ def publish_cargo(cargo_data):
                     ]
                 },
                 "unloading": {
-                    "city_id": unloading_city_id,
-                    "address": cargo_data["unloading_address"]
-                }
+                    "city_id": cargo_data["unloading_city_id"],
+                    "address": cargo_data["unloading_address"],
+                    "dates": unload_dates  # 🆕 Передаем даты разгрузки (если есть)
+                } if unload_dates else {"city_id": cargo_data["unloading_city_id"], "address": cargo_data["unloading_address"]}  # Не передаем пустой блок
             },
-            "truck": {
-                "load_type": "ftl",
-                "body_types": [200],
-                "body_loading": {"types": [8], "is_all_required": True},
-                "body_unloading": {"types": [8], "is_all_required": True}
-            },
-            "payment": {
-                "type": "rate-request",
-                "hide_counter_offers": True,
-                "direct_offer": True,
-                "payment_mode": {
-                    "type": "delayed-payment",
-                    "payment_delay_days": 30
-                },
-                "currency_type": 1,
-                "rate_with_vat_available": True,
-                "rate_without_vat_available": True
-            },
+            "truck": truck_data,  # 🆕 Теперь `truck` формируется тут
+            "payment": cargo_data["payment"],
             "boards": [{"id": "a0a0a0a0a0a0a0a0a0a0a0a0", "publication_mode": "now"}],
-            "note": cargo_data.get("note", "Автоматическая публикация"),
-            "contacts": [logist_id]
+            "note": cargo_data["note"],
+            "contacts": [cargo_data["logist_id"]]
         }
     }
 
@@ -147,17 +185,55 @@ def publish_cargo(cargo_data):
     print(f"❌ Ошибка публикации: {response.status_code}")
     return response.json()
 
-# 🔹 **Тестовые данные**
-test_cargo = {
-    "external_id": "test_001",
-    "loading_city": "Челябинск",
-    "loading_address": "ул. Тверская, д. 1",
-    "unloading_city": "Аскино",
-    "unloading_address": "ул Ленина, дом 5",
-    "cargo_name": "Стройматериалы",
-    "weight": 20,
-    "volume": 90,
-    "note": "тестовая отправка",
-    "logist": "Сергей"
-}
+def update_cargo(order_id):
+    """Обновление заявки на ATI"""
+    order = session.query(Order).filter_by(id=order_id).first()
+    if not order or not order.is_published:
+        print(f"❌ Заявка {order_id} не найдена или не опубликована!")
+        return
+    
+    payload = {
+        "cargo_application": {
+            "external_id": str(order.external_no),
+            "route": {
+                "loading": {
+                    "city_id": order.loading_city,
+                    "address": order.loading_address
+                },
+                "unloading": {
+                    "city_id": order.unloading_city,
+                    "address": order.unloading_address
+                }
+            },
+            "truck": {
+                "load_type": "ftl",
+                "body_types": [200]
+            },
+            "payment": {
+                "type": "rate-request"
+            },
+            "boards": [{"id": "a0a0a0a0a0a0a0a0a0a0a0a0", "publication_mode": "now"}],
+            "contacts": [order.logistician_name]
+        }
+    }
 
+    response = requests.put(f"{ATI_API_BASE_URL}/v2/cargos/{order.is_published}", json=payload, headers=HEADERS)
+    if response.status_code == 200:
+        print(f"✅ Заявка {order_id} успешно обновлена!")
+    else:
+        print(f"❌ Ошибка обновления заявки {order_id}: {response.status_code} - {response.text}")
+
+def delete_cargo(order_id):
+    """Удаление заявки с ATI"""
+    order = session.query(Order).filter_by(id=order_id).first()
+    if not order or not order.is_published:
+        print(f"❌ Заявка {order_id} не найдена или не опубликована!")
+        return
+    
+    response = requests.delete(f"{ATI_API_BASE_URL}/v2/cargos/{order.is_published}", headers=HEADERS)
+    if response.status_code == 200:
+        print(f"✅ Заявка {order_id} успешно удалена с ATI!")
+        order.is_published = None  # Обнуляем флаг публикации
+        session.commit()
+    else:
+        print(f"❌ Ошибка удаления заявки {order_id}: {response.status_code} - {response.text}")

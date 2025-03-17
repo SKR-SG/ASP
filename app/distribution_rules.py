@@ -8,11 +8,11 @@ def distribute_order(order, session: Session):
     
     for rule in rules:
         # Проверяем соответствие города загрузки и выгрузки
-        if (rule.loading_city_id in [None, order["loading_city_id"]]) and \
-           (rule.unloading_city_id in [None, order["unloading_city_id"]]):
+        if (rule.loading_city in [None, order["loading_city"]]) and \
+           (rule.unloading_city in [None, order["unloading_city"]]):
 
             # Определяем логиста
-            logist = session.query(Logist).filter_by(id=rule.logist_id).first()
+            logist = session.query(Logist).filter_by(name=rule.logistician).first()
             if not logist:
                 continue
 
