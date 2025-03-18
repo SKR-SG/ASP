@@ -1,15 +1,15 @@
 import os
 import requests
 import re
+import time
+from threading import Timer
 from datetime import datetime, timezone
 from sqlalchemy import create_engine, or_, Column, Integer, String, Boolean, Float
 from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import dotenv_values, load_dotenv
 from app.models import Order, DistributionRule  # Импорт моделей
-from app.ati_client import publish_cargo  # Импорт публикации в АТИ
-from app.ati_client import get_city_id  # Импорт функции для получения ID города
-from app.distribution_rules import distribute_order  # Импорт функции распределения
-from app.transformers.ati_transformer import prepare_order_for_ati  # Импорт функции преобразования
+from app.transformers.ati_transformer import prepare_order_for_ati
+from app.ati_client import publish_cargo
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -217,37 +217,9 @@ def process_orders():
    
     for order, order_type in all_orders:
         process_order(order, order_type)
+
+    delete_old_orders(assigned_orders, auction_orders, free_orders)
     
-def filter_valid_orders(orders, order_type):
-    """Фильтруем заявки: проверяем статус и дату отгрузки"""
-    current_datetime = datetime.now(timezone.utc)
-
-    valid_orders = []
-    for order in orders:
-        load_date = order.get("loadingDatetime")
-        if not load_date:
-            continue
-
-        # Преобразуем дату отгрузки в UTC и проверяем
-        load_datetime = datetime.fromisoformat(load_date)
-        if load_datetime < current_datetime:
-            continue
-
-        # Фильтр для разных типов заявок
-        if order_type == "AUCTION":
-            if order.get("status") != "FREE" or order.get("lot", {}).get("auctionStatus") != "ACTIVE":
-                continue
-        elif order_type == "FREE":
-            if order.get("status") != "FREE":
-                continue
-        elif order_type == "ASSIGNED":
-            if order.get("status") != "ASSIGNED":
-                continue
-
-        valid_orders.append(order)
-
-    return valid_orders
-
 def extract_street_and_house(address):
     """Извлекает улицу и дом из строки адреса"""
 
@@ -258,7 +230,7 @@ def extract_street_and_house(address):
     parts = [part.strip() for part in address.split(",")]
 
     # Ключевые слова для поиска улицы
-    street_keywords = ["ул", "улица", "пр-кт", "проспект", "тракт", "шоссе", "пер", "переулок"]
+    street_keywords = ["ул", "улица", "пр-кт", "проспект", "тракт", "шоссе", "ш" , "пер", "переулок"]
 
     street_part = None
     house_number = None
@@ -325,6 +297,7 @@ def process_order(order, order_type):
     else:
         bid_price = order.get("price", 0)  # Для обычных заявок берем price
 
+    # Определение логиста по правилам распределения 
     # 🛠 1. Ищем точное совпадение по погрузке и выгрузке
     rule = session.query(DistributionRule).filter(
         DistributionRule.loading_city == loading_city,
@@ -345,7 +318,14 @@ def process_order(order, order_type):
             DistributionRule.unloading_city == unloading_city
         ).first()
 
-    # 🛠 4. Назначаем логиста
+    # 🛠 4. Если все еще нет совпадений, ищем **полностью универсальное** правило (`None` и для загрузки, и для выгрузки)
+    if not rule:
+        rule = session.query(DistributionRule).filter(
+            DistributionRule.loading_city.is_(None),
+            DistributionRule.unloading_city.is_(None)
+        ).first()
+
+    # 🛠 5. Назначаем логиста
     logistician_name = rule.logistician if rule else None
 
     if logistician_name:
@@ -383,15 +363,61 @@ def process_order(order, order_type):
         "bid_price": bid_price,
         "address": address
     })
-def delete_old_orders():
-    """Удаляет заявки, которых больше нет в TMS"""
-    active_external_nos = {order["externalNo"] for order in fetch_orders(ASSIGNED_ORDERS_URL, assigned_payload)}
+
+    # ✅ Проверяем `auto_publish` и `publish_delay`
+    if rule and rule.auto_publish:
+        publish_delay = rule.publish_delay or 0
+        print(f"🚀 Авто-публикация заявки {external_no} через {publish_delay} минут.")
+
+        if publish_delay == 0:
+            publish_now(external_no)
+        else:
+            Timer(publish_delay * 60, publish_now, args=[external_no]).start()  # Запускаем отложенную публикацию
+
+def publish_now(external_no):
+    """Публикует заявку в ATI, если она есть в БД"""
+    order = session.query(Order).filter(Order.external_no == external_no).first()
     
-    # Удаляем только те заявки, которых нет среди активных external_no
+    if not order:
+        print(f"⚠️ Ошибка: Заявка {external_no} не найдена в БД, публикация отменена.")
+        return
+
+    cargo_data = prepare_order_for_ati(order)
+    response = publish_cargo(cargo_data)
+
+    if response and "cargo_id" in response:
+        order.cargo_id = response["cargo_id"]
+        order.is_published = response["cargo_number"]
+        session.commit()
+        print(f"✅ Заявка {external_no} успешно опубликована в ATI: {response['cargo_number']}")
+    else:
+        print(f"❌ Ошибка публикации заявки {external_no}.")
+
+def delete_old_orders(assigned_orders, auction_orders, free_orders):
+    """Удаляет заявки, которых больше нет в TMS (используя уже загруженные данные)"""
+
+    # 🔄 Собираем externalNo только у свежих заявок
+    active_external_nos = {
+        order["externalNo"] for order in assigned_orders + auction_orders + free_orders
+    }
+
+     # 🔄 Получаем все заявки из БД
+    db_orders = {o.external_no for o in session.query(Order.external_no).all()}
+    print(f"DEBUG: Найдено {len(db_orders)} заявок в БД")
+
+    # 🔍 Вычисляем заявки, которые больше не актуальны
+    to_delete = db_orders - active_external_nos
+    print(f"DEBUG: Количество заявок, подлежащих удалению: {len(to_delete)}")
+
+    if not to_delete:
+        print("✅ Нет заявок для удаления.")
+        return
+
+    # 🗑️ Удаляем неактуальные заявки
     deleted_orders = session.query(Order).filter(
-        ~Order.external_no.in_(active_external_nos)  # Если external_no не в активных заказах
+        Order.external_no.in_(to_delete)
     ).delete(synchronize_session=False)
-    
+
     session.commit()
 
     print(f"🗑 Удалено {deleted_orders} неактуальных заявок")
@@ -412,6 +438,7 @@ def save_order(order_data):
         print(f"➕ Добавлена новая заявка {order_data['external_no']}")
 
     session.commit()
+ 
 
 if __name__ == "__main__":
     process_orders()

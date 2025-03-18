@@ -37,14 +37,17 @@ def sync_logists(db: Session):
         return
 
     for ati_logist in logists_from_ati:
-        name = ati_logist.get("name")
-        contact_id = ati_logist.get("contact_id")
+        name = ati_logist.get("name", "").strip()
+        contact_id = ati_logist.get("contact_id", 0)
 
-        if not name or not contact_id:
-            continue  # Пропускаем некорректные записи
+        if not name:
+            print(f"⚠️ Пропускаем логиста без имени: {ati_logist}")
+            continue  # Пропускаем записи без имени
+
+        print(f"DEBUG: Загружен логист {name} с contact_id={contact_id}")
 
         # Проверяем, есть ли уже такой логист в БД
-        existing_logist = db.query(Logist).filter_by(contact_id=contact_id).first()
+        existing_logist = db.query(Logist).filter(Logist.contact_id == contact_id).first()
 
         if existing_logist:
             existing_logist.name = name  # Обновляем имя логиста

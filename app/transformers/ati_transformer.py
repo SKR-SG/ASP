@@ -78,7 +78,7 @@ def prepare_order_for_ati(order):
 
     # Получаем ID логиста
     logist_id = get_contact_id(order.logistician_name)
-
+    
     # Берем `ati_price` из `orders`
     ati_price = order.ati_price
 

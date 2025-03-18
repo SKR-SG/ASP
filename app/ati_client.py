@@ -1,9 +1,12 @@
+import json
 import os
 import requests
+import time
 from dotenv import load_dotenv
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy import create_engine
 from app.models import Logist, Order  # Исправленный импорт
+from app.database import SessionLocal
 
 # Загружаем переменные окружения
 load_dotenv()
@@ -75,13 +78,15 @@ def get_city_id(city_name):
 
 def get_contact_id(logist_name):
     """Получает ID логиста из БД или API ATI."""
-    # 1️⃣ Проверяем в БД
+    session = SessionLocal()
     logist = session.query(Logist).filter(Logist.name.ilike(f"%{logist_name}%")).first()
+    session.close()
+
     if logist:
         print(f"✅ Найден ID логиста {logist.name} в БД: {logist.contact_id}")
         return logist.contact_id
-    
-    # 2️⃣ Запрашиваем API ATI
+
+    # Запрашиваем API ATI
     url = f"{ATI_API_BASE_URL}/v1.0/firms/contacts"
     response = requests.get(url, headers=HEADERS)
 
@@ -89,24 +94,20 @@ def get_contact_id(logist_name):
         contacts = response.json()
         for contact in contacts:
             if logist_name.lower() in contact["name"].lower():
-                new_logist = Logist(name=contact["name"], contact_id=contact["id"])  # Исправлено
-                session.add(new_logist)
-                session.commit()
-                print(f"✅ Добавлен логист {contact['name']} в БД, ID: {contact['id']}")
                 return contact["id"]
     
-    print(f"❌ Логист {logist_name} не найден!")
+    print(f"❌ Логист {logist_name} не найден в ATI!")
     return None
 
 def publish_cargo(cargo_data):
-    """Публикует груз в ATI.SU."""
+    """Публикует груз в ATI и сохраняет cargo_id и cargo_number в БД"""
     url = f"{ATI_API_BASE_URL}/v2/cargos"
 
-    # Проверяем, все ли ID переданы
+        # Проверяем, все ли ID переданы
     if not cargo_data["loading_city_id"] or not cargo_data["unloading_city_id"]:
         return {"error": "Ошибка: не определены ID городов"}
 
-    if not cargo_data["logist_id"]:
+    if cargo_data["logist_id"] is None or cargo_data["logist_id"] == "":
         return {"error": "Ошибка: не определен ID логиста"}
 
     # 🆕 Исправленная передача `load_date`
@@ -169,7 +170,7 @@ def publish_cargo(cargo_data):
             "payment": cargo_data["payment"],
             "boards": [{"id": "a0a0a0a0a0a0a0a0a0a0a0a0", "publication_mode": "now"}],
             "note": cargo_data["note"],
-            "contacts": [cargo_data["logist_id"]]
+            "contacts": [cargo_data["logist_id"]],
         }
     }
 
@@ -180,60 +181,140 @@ def publish_cargo(cargo_data):
         cargo_id = data["cargo_application"]["cargo_id"]
         cargo_number = data["cargo_application"]["cargo_number"]
         print(f"✅ Груз опубликован! ID: {cargo_id}, Номер: {cargo_number}")
+        
+    
+        
+        # Обновляем БД
+        db = SessionLocal()
+        order = db.query(Order).filter(Order.external_no == cargo_data["external_id"]).first()
+        if order:
+            order.cargo_id = str(cargo_id)  # 🛠️ Приводим к строке
+            order.is_published = str(cargo_number)  # 🛠️ Приводим к строке
+            db.commit()
+        db.close()    
+        
         return {"cargo_id": cargo_id, "cargo_number": cargo_number}
 
-    print(f"❌ Ошибка публикации: {response.status_code}")
+    print(f"❌ Ошибка публикации: {response.status_code}, {response.text}")
     return response.json()
 
-def update_cargo(order_id):
-    """Обновление заявки на ATI"""
-    order = session.query(Order).filter_by(id=order_id).first()
-    if not order or not order.is_published:
-        print(f"❌ Заявка {order_id} не найдена или не опубликована!")
-        return
+def update_cargo(cargo_data):
+    """Обновляет заявку груза на ATI"""
     
+    if not cargo_data["cargo_id"]:
+        print(f"❌ Ошибка: У груза {cargo_data['external_id']} нет cargo_id, обновление невозможно.")
+        return {"error": "cargo_id отсутствует, обновление невозможно"}
+
+    url = f"{ATI_API_BASE_URL}/v2/cargos/{cargo_data['cargo_id']}"
+
+        # Проверяем, все ли ID переданы
+    if not cargo_data["loading_city_id"] or not cargo_data["unloading_city_id"]:
+        return {"error": "Ошибка: не определены ID городов"}
+
+    if cargo_data["logist_id"] is None or cargo_data["logist_id"] == "":
+        return {"error": "Ошибка: не определен ID логиста"}
+
+    # 🆕 Исправленная передача `load_date`
+    load_dates = {
+        "type": "from-date",
+        "time": {
+            "type": "bounded",
+            "start": cargo_data["loading_dates"]["time"]["start"],
+            "end": cargo_data["loading_dates"]["time"]["end"],
+            "offset": "+00:00"
+        },
+        "first_date": cargo_data["loading_dates"]["first_date"],
+        "last_date": cargo_data["loading_dates"]["last_date"]
+    }
+
+    # 🆕 Исправленная передача `unload_date`
+    unload_dates = {
+        "first_date": cargo_data["unloading_dates"]["first_date"],
+        "last_date": cargo_data["unloading_dates"]["last_date"],
+        "time": {
+            "type": "bounded" if cargo_data["unloading_dates"]["time"]["start"] else "round-the-clock",
+            "start": cargo_data["unloading_dates"]["time"]["start"],
+            "end": cargo_data["unloading_dates"]["time"]["end"],
+            "offset": "+00:00"
+        }
+    } if cargo_data["unloading_dates"]["first_date"] else None  # Если нет даты, не передаем
+
+    # 🆕 Формируем структуру `truck`
+    truck_data = {
+        "load_type": "ftl",
+        "body_types": cargo_data["body_types"],
+        "body_loading": {"types": cargo_data["body_loading"], "is_all_required": True},
+        "body_unloading": {"types": cargo_data["body_unloading"], "is_all_required": True}
+    }
+
+    # Формируем запрос на публикацию
     payload = {
         "cargo_application": {
-            "external_id": str(order.external_no),
             "route": {
                 "loading": {
-                    "city_id": order.loading_city,
-                    "address": order.loading_address
+                    "city_id": cargo_data["loading_city_id"],
+                    "address": cargo_data["loading_address"],
+                    "dates": load_dates,  # 🆕 Передаем исправленные даты
+                    "cargos": [
+                        {
+                            "id": 1,
+                            "name": cargo_data["cargo_name"],
+                            "weight": {"type": "tons", "quantity": cargo_data["weight"]},
+                            "volume": {"quantity": cargo_data["volume"]}
+                        }
+                    ]
                 },
                 "unloading": {
-                    "city_id": order.unloading_city,
-                    "address": order.unloading_address
-                }
+                    "city_id": cargo_data["unloading_city_id"],
+                    "address": cargo_data["unloading_address"],
+                    "dates": unload_dates  # 🆕 Передаем даты разгрузки (если есть)
+                } if unload_dates else {"city_id": cargo_data["unloading_city_id"], "address": cargo_data["unloading_address"]}  # Не передаем пустой блок
             },
-            "truck": {
-                "load_type": "ftl",
-                "body_types": [200]
-            },
-            "payment": {
-                "type": "rate-request"
-            },
+            "truck": truck_data,  # 🆕 Теперь `truck` формируется тут
+            "payment": cargo_data["payment"],
             "boards": [{"id": "a0a0a0a0a0a0a0a0a0a0a0a0", "publication_mode": "now"}],
-            "contacts": [order.logistician_name]
+            "note": cargo_data["note"],
+            "contacts": [cargo_data["logist_id"]],
         }
     }
 
-    response = requests.put(f"{ATI_API_BASE_URL}/v2/cargos/{order.is_published}", json=payload, headers=HEADERS)
-    if response.status_code == 200:
-        print(f"✅ Заявка {order_id} успешно обновлена!")
-    else:
-        print(f"❌ Ошибка обновления заявки {order_id}: {response.status_code} - {response.text}")
+    response = requests.put(url, json=payload, headers=HEADERS)
 
-def delete_cargo(order_id):
-    """Удаление заявки с ATI"""
-    order = session.query(Order).filter_by(id=order_id).first()
-    if not order or not order.is_published:
-        print(f"❌ Заявка {order_id} не найдена или не опубликована!")
-        return
-    
-    response = requests.delete(f"{ATI_API_BASE_URL}/v2/cargos/{order.is_published}", headers=HEADERS)
     if response.status_code == 200:
-        print(f"✅ Заявка {order_id} успешно удалена с ATI!")
-        order.is_published = None  # Обнуляем флаг публикации
-        session.commit()
+        print(f"✅ Груз {cargo_data['cargo_id']} ({cargo_data['external_id']}) обновлен успешно!")
+        return response.json()
+
+    elif response.status_code == 429:
+        print(f"⚠️ Ошибка 429. Превышен суточный лимит запросов (5000) для контакта. Дальнейшие запросы невозможны в течение 24 часов.")
+        return {"error": "Превышен суточный лимит запросов (5000) для контакта"}
+
     else:
-        print(f"❌ Ошибка удаления заявки {order_id}: {response.status_code} - {response.text}")
+        print(f"❌ Ошибка обновления {cargo_data['cargo_id']}: {response.status_code}, {response.text}")
+        return response.json()
+
+def delete_cargo(order):
+    """Удаляет заявку груза на ATI"""
+    if not order.cargo_id:
+        print(f"❌ Ошибка: У заявки {order.external_no} нет cargo_id, удаление невозможно.")
+        return {"error": "cargo_id отсутствует, удаление невозможно"}
+
+    url = f"{ATI_API_BASE_URL}/v1.0/loads/{order.cargo_id}"
+
+    response = requests.delete(url, headers=HEADERS)
+
+    if response.status_code == 200:
+        print(f"✅ Груз {order.cargo_id} ({order.external_no}) удален успешно!")
+
+        # Обновляем БД
+        db = SessionLocal()
+        order_in_db = db.query(Order).filter(Order.external_no == order.external_no).first()
+        if order_in_db:
+            order_in_db.cargo_id = None
+            order_in_db.is_published = None
+            db.commit()
+        db.close()
+
+        return response.json()
+    else:
+        print(f"❌ Ошибка удаления {order.cargo_id}: {response.status_code}, {response.text}")
+        return response.json()

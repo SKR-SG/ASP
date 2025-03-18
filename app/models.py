@@ -39,11 +39,12 @@ class Order(Base):
     cargo_name = Column(String, nullable=True)  # Наименование груза
     logistician_name = Column(String, nullable=True)  # Имя логиста
     ati_price = Column(Float, nullable=True)  # Цена для АТИ
-    is_published = Column(Boolean, default=False)  # Опубликован ли груз на АТИ
+    is_published = Column(String(50), nullable=True) # Опубликован ли груз на АТИ
     order_type = Column(String, nullable=False)  # Тип заявки (ASSIGNED, AUCTION, FREE)
     bid_price = Column(Float, nullable=True)  # Ставка (или последняя ставка для аукционов)
     platform = Column(String, nullable=False)  # Источник (TMS, API)
     address = Column(String, nullable=True)  # 🆕 поле для извлеченного адреса выгрузки
+    cargo_id = Column(String, nullable=True)  # 🆕 Сохраняем cargo_id для обновления/удаления
 
 class Logist(Base):
     __tablename__ = "logists"
