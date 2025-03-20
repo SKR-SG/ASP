@@ -1,5 +1,5 @@
 import os
-from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, Date, DateTime, MetaData
+from sqlalchemy import create_engine, Column, Integer, String, Float, Boolean, ForeignKey, Date, DateTime, MetaData, JSON
 from sqlalchemy.orm import relationship, sessionmaker, declarative_base
 from dotenv import load_dotenv
 
@@ -7,7 +7,10 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # Настройка подключения к БД
-DATABASE_URL = os.getenv("DATABASE_URL", "postgresql://postgres:159753@localhost/acp_db")
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise ValueError("❌ Ошибка: DATABASE_URL не задан! Проверь .env файл.")
+
 metadata = MetaData()
 Base = declarative_base(metadata=metadata)
 engine = create_engine(DATABASE_URL)
@@ -43,7 +46,8 @@ class Order(Base):
     order_type = Column(String, nullable=False)  # Тип заявки (ASSIGNED, AUCTION, FREE)
     bid_price = Column(Float, nullable=True)  # Ставка (или последняя ставка для аукционов)
     platform = Column(String, nullable=False)  # Источник (TMS, API)
-    address = Column(String, nullable=True)  # 🆕 поле для извлеченного адреса выгрузки
+    loading_address = Column(String(255), nullable=True)  # ✅ поле для адреса погрузки
+    unloading_address = Column(String(255), nullable=True)  # ✅ Поле для адреса выгрузки
     cargo_id = Column(String, nullable=True)  # 🆕 Сохраняем cargo_id для обновления/удаления
 
 class Logist(Base):
@@ -56,6 +60,7 @@ class DistributionRule(Base):
     __tablename__ = 'distribution_rules'
 
     id = Column(Integer, primary_key=True, index=True)
+    platform = Column(String, nullable=False, index=True, default="transport2") # Площадка
     loading_city = Column(String, index=True)
     unloading_city = Column(String, index=True)
     logistician = Column(String) # Убедитесь, что атрибут logistician определен
@@ -63,9 +68,13 @@ class DistributionRule(Base):
     auction_margin_percent = Column(Float, nullable=True) # Маржа для аукциона
     cargo_name = Column(String, nullable=True) # Название груза
     auto_publish = Column(Boolean, default=False) # Авторазмещение
+    auto_publish_auction = Column(Boolean, default=False)       # авто-публикация для аукционных заявок
     publish_delay = Column(Integer, default=0) # Задержка публикации
     payment_days = Column(Integer, default=0) # Срок оплаты б/д
 
-
-# Создание таблицы в БД
-Base.metadata.create_all(engine)
+class Platform(Base):
+    __tablename__ = 'platforms'
+    id = Column(Integer, primary_key=True)
+    name = Column(String, unique=True, nullable=False)  # имя площадки, например "transport2"
+    enabled = Column(Boolean, default=True)  # включена или выключена площадка
+    auth_data = Column(JSON, nullable=True)    # данные для авторизации (например, токены, URL и т.д.)

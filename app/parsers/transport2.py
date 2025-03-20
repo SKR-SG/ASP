@@ -1,19 +1,21 @@
 import os
 import requests
 import re
-import time
 from threading import Timer
 from datetime import datetime, timezone
-from sqlalchemy import create_engine, or_, Column, Integer, String, Boolean, Float
-from sqlalchemy.orm import sessionmaker, declarative_base
 from dotenv import dotenv_values, load_dotenv
-from app.models import Order, DistributionRule  # Импорт моделей
+
+# Импорт моделей, логики преобразования и работы с ATI
+from app.models import Order, DistributionRule, Platform  
 from app.transformers.ati_transformer import prepare_order_for_ati
-from app.ati_client import publish_cargo
+from app.ati_client import publish_cargo, update_cargo, delete_cargo
+
+# Вместо создания подключения вручную импортируем SessionLocal
+from app.database import SessionLocal
 
 # Загружаем переменные окружения
 load_dotenv()
-env_values = dotenv_values(".env")  # Загружаем принудительно
+env_values = dotenv_values(".env")  # Загружаем .env принудительно
 
 # API URL и Токен
 T2_API_TOKEN = env_values.get("T2_API_TOKEN")
@@ -28,11 +30,8 @@ headers = {
     "Authorization": f"Token {T2_API_TOKEN}"
 }
 
-# Настройка базы данных
-Base = declarative_base()
-engine = create_engine(DATABASE_URL)
-Session = sessionmaker(bind=engine)
-session = Session()
+# Создаем сессию базы данных через SessionLocal
+session = SessionLocal()
 
 # URL-адреса для разных типов заявок
 ASSIGNED_ORDERS_URL = "https://api.transport2.ru/carrier/graphql?operation=assignedOrders"
@@ -220,22 +219,33 @@ def process_orders():
 
     delete_old_orders(assigned_orders, auction_orders, free_orders)
     
-def extract_street_and_house(address):
-    """Извлекает улицу и дом из строки адреса"""
+def extract_street_and_house(address, include_house_number=True):
+    """Извлекает улицу и дом из строки адреса.
+    
+    - `include_house_number=True` → улица + номер дома (для unloading_address).
+    - `include_house_number=False` → только улица (для loading_address).
+    """
+
+    if not address:
+        return None
 
     # Удаляем текст в скобках (например, "(Екатеринбург)")
-    address = re.sub(r"\(.*?\)", "", address).strip()
+    address = re.sub(r"\(.*?\)|\bориентир\b", "", address).strip()  
 
     # Разбиваем строку на части
     parts = [part.strip() for part in address.split(",")]
 
     # Ключевые слова для поиска улицы
-    street_keywords = ["ул", "улица", "пр-кт", "проспект", "тракт", "шоссе", "ш" , "пер", "переулок"]
+    street_keywords = ["ул", "улица", "пр-кт", "проспект", "тракт", "шоссе", "ш", "пер", "переулок", "проезд"]
+
+    # Ключевые слова для населенного пункта (чтобы пропустить его и взять следующее поле)
+    city_keywords = ["г", "город", "пос", "поселок", "д", "деревня", "пгт", "с", "село", "ст", "станция"]
 
     street_part = None
     house_number = None
+    city_found = False
 
-    # Ищем первое поле, похожее на улицу
+    # 1️⃣ **Сначала ищем улицу по ключевым словам**
     for part in parts:
         words = part.split()
 
@@ -244,24 +254,37 @@ def extract_street_and_house(address):
             street_part = " ".join([word for word in words if word.lower() not in ["ул", "улица"]]).strip()
             break  # Останавливаемся после нахождения первой улицы
 
-    # Если нашли улицу, проверяем, есть ли номер дома в следующих частях
-    if street_part:
+    # 2️⃣ **Если улица не найдена, ищем первое поле после города**
+    if not street_part:
+        for part in parts:
+            words = part.split()
+
+            # Если нашли населенный пункт, ставим флаг `city_found`
+            if any(word.lower() in city_keywords for word in words):
+                city_found = True
+                continue
+
+            # Если город найден и следующее поле похоже на улицу → берем его
+            if city_found:
+                street_part = part
+                break
+
+    # Если улица найдена и нужно добавить номер дома
+    if include_house_number and street_part:
         for next_part in parts[parts.index(part) + 1:]:
             if re.search(r"\d", next_part):  # Если есть цифра – это номер дома
                 house_number = next_part
                 break  # Берем первый найденный номер
 
     # Формируем итоговый результат
-    result = f"{street_part} {house_number}" if house_number else street_part
-
-    print(f"DEBUG: address={address}, result={result}")  # Отладка
+    result = f"{street_part} {house_number}" if include_house_number and house_number else street_part
 
     return result
-
 
 def process_order(order, order_type):
     """Обрабатываем заказ и сохраняем в БД без преобразования для АТИ"""
     external_no = order.get("externalNo", "N/A")
+    existing_order = session.query(Order).filter(Order.external_no == external_no).first()
 
     # Город погрузки и выгрузки
     loading_place = order.get("loadingPlaces", [{}])[0].get("storagePoint", {})
@@ -269,8 +292,9 @@ def process_order(order, order_type):
     loading_city = loading_place.get("settlement", "N/A")
     unloading_city = unloading_place.get("settlement", "N/A")
 
-    # Адрес формат улица дом
-    address = extract_street_and_house(order["unloadingPlaces"][0]["storagePoint"]["address"])
+    # Извлекаем адреса
+    loading_address = extract_street_and_house(loading_place.get("address"), include_house_number=False)  # ✅ Только улица
+    unloading_address = extract_street_and_house(unloading_place.get("address"), include_house_number=True)  # ✅ Улица + дом
 
     # Даты
     load_date = order.get("loadingDatetime", "N/A")
@@ -328,13 +352,11 @@ def process_order(order, order_type):
     # 🛠 5. Назначаем логиста
     logistician_name = rule.logistician if rule else None
 
-    if logistician_name:
-        print(f"✅ Назначен логист: {logistician_name} для {loading_city} -> {unloading_city}")
-    else:
+    if not logistician_name:
         print(f"❌ Логист не найден для {loading_city} -> {unloading_city}")
 
     # Получаем наименование груза по правилам распределения
-    cargo_name = rule.cargo_name if rule and rule.cargo_name else "Груз без названия"
+    cargo_name = rule.cargo_name if rule and rule.cargo_name else "ТНП"
 
     # Рассчитываем `ati_price`
     ati_price = None
@@ -343,36 +365,69 @@ def process_order(order, order_type):
         if margin_percent is not None:
             ati_price = bid_price * (100 - margin_percent) / 100    
 
-    # Сохраняем в БД
-    save_order({
-        "external_no": external_no,
-        "platform": "Transport2",
-        "load_date": load_date,
-        "loading_city": loading_city,
-        "unloading_city": unloading_city,
-        "unload_date": unload_date,
-        "weight_volume": weight_volume,
-        "vehicle_type": vehicle_type,
-        "loading_types": loading_types,
-        "comment": comment,
-        "cargo_name": cargo_name,
-        "logistician_name": logistician_name,
-        "ati_price": ati_price,  # ✅ Теперь записываем рассчитанный ati_price
-        "is_published": False,
-        "order_type": order_type,
-        "bid_price": bid_price,
-        "address": address
-    })
 
-    # ✅ Проверяем `auto_publish` и `publish_delay`
-    if rule and rule.auto_publish:
-        publish_delay = rule.publish_delay or 0
-        print(f"🚀 Авто-публикация заявки {external_no} через {publish_delay} минут.")
+    publish_delay = rule.publish_delay if rule and rule.publish_delay else 0
 
-        if publish_delay == 0:
-            publish_now(external_no)
-        else:
-            Timer(publish_delay * 60, publish_now, args=[external_no]).start()  # Запускаем отложенную публикацию
+    if existing_order:
+        print(f"🔄 Обновление заявки {external_no}")
+
+        # ✅ Проверяем, изменялись ли критические поля
+        is_updated = (
+            existing_order.load_date != load_date or
+            existing_order.unload_date != unload_date or
+            existing_order.weight_volume != weight_volume or
+            existing_order.vehicle_type != vehicle_type or
+            existing_order.loading_types != loading_types or
+            existing_order.bid_price != bid_price or  # ✅ Теперь проверяем `bid_price`
+            existing_order.loading_city != loading_city or  # ✅ Теперь проверяем `loading_city`
+            existing_order.unloading_city != unloading_city or  # ✅ Теперь проверяем `unloading_city`
+            existing_order.loading_address != loading_address or  # ✅ Проверяем `loading_address`
+            existing_order.unloading_address != unloading_address or  # ✅ Проверяем `unloading_address`
+            (existing_order.ati_price != order.get("price") if existing_order.ati_price else False)  # ✅ `ati_price` не перезаписывается, если редактировался вручную
+        )
+
+        if existing_order.is_published and rule and rule.auto_publish and is_updated:
+            print(f"🚀 Авто-обновление заявки {external_no} в ATI")
+            cargo_data = prepare_order_for_ati(existing_order)
+            update_cargo(cargo_data)  # ✅ `update_cargo()` выполняется без задержки
+
+        session.commit()
+    
+    else:
+        # ✅ Создание новой заявки
+        new_order = Order(
+            external_no=external_no,
+            platform="Transport2",
+            load_date=load_date,
+            unload_date=unload_date,
+            loading_city=loading_city,  # ✅ Добавили `loading_city`
+            unloading_city=unloading_city,  # ✅ Добавили `unloading_city`
+            weight_volume=weight_volume,
+            vehicle_type=vehicle_type,
+            loading_types=loading_types,
+            comment=comment,
+            cargo_name=cargo_name,
+            logistician_name=logistician_name,
+            ati_price=order.get("price"),
+            is_published=False,
+            order_type=order_type,
+            bid_price=bid_price,
+            loading_address=loading_address,  # ✅ Теперь только улица
+            unloading_address=unloading_address  # ✅ Теперь улица + дом
+        )
+        session.add(new_order)
+        session.commit()
+        print(f"➕ Добавлена новая заявка {external_no}")
+
+        if rule:
+            # Выбираем авто-публикацию в зависимости от типа заявки
+            auto_publish_flag = rule.auto_publish_auction if order_type == "AUCTION" else rule.auto_publish
+            if auto_publish_flag:
+                print(f"🚀 Авто-публикация заявки {external_no} через {publish_delay} минут.")
+                if publish_delay == 0:
+                    publish_now(external_no)
+                else:
+                    Timer(publish_delay * 60, publish_now, args=[external_no]).start()
 
 def publish_now(external_no):
     """Публикует заявку в ATI, если она есть в БД"""
@@ -394,33 +449,28 @@ def publish_now(external_no):
         print(f"❌ Ошибка публикации заявки {external_no}.")
 
 def delete_old_orders(assigned_orders, auction_orders, free_orders):
-    """Удаляет заявки, которых больше нет в TMS (используя уже загруженные данные)"""
+    """Удаляет заявки, которых больше нет в TMS"""
 
-    # 🔄 Собираем externalNo только у свежих заявок
     active_external_nos = {
         order["externalNo"] for order in assigned_orders + auction_orders + free_orders
     }
 
-     # 🔄 Получаем все заявки из БД
-    db_orders = {o.external_no for o in session.query(Order.external_no).all()}
-    print(f"DEBUG: Найдено {len(db_orders)} заявок в БД")
-
-    # 🔍 Вычисляем заявки, которые больше не актуальны
-    to_delete = db_orders - active_external_nos
-    print(f"DEBUG: Количество заявок, подлежащих удалению: {len(to_delete)}")
+    db_orders = session.query(Order).all()  
+    to_delete = [order for order in db_orders if order.external_no not in active_external_nos]
 
     if not to_delete:
         print("✅ Нет заявок для удаления.")
         return
 
-    # 🗑️ Удаляем неактуальные заявки
-    deleted_orders = session.query(Order).filter(
-        Order.external_no.in_(to_delete)
-    ).delete(synchronize_session=False)
+    for order in to_delete:
+        if order.cargo_id:
+            print(f"🗑 Удаляем заявку {order.external_no} из ATI")
+            delete_cargo(order)  # ✅ Теперь передаем `order` целиком
+
+        session.delete(order)  # ✅ Теперь безопасно удаляем из БД
 
     session.commit()
-
-    print(f"🗑 Удалено {deleted_orders} неактуальных заявок")
+    print(f"🗑 Удалено {len(to_delete)} неактуальных заявок")
 
 def save_order(order_data):
     """Сохраняем или обновляем данные в таблицу `orders`"""
@@ -438,7 +488,15 @@ def save_order(order_data):
         print(f"➕ Добавлена новая заявка {order_data['external_no']}")
 
     session.commit()
- 
+
+def is_platform_enabled(platform_name: str) -> bool:
+    db = SessionLocal()
+    platform = db.query(Platform).filter(Platform.name == platform_name).first()
+    db.close()
+    return platform.enabled if platform else False
 
 if __name__ == "__main__":
-    process_orders()
+    if is_platform_enabled("Transport2"):
+        process_orders()  # Ваша функция парсинга
+    else:
+        print("Площадка transport2 отключена, парсинг не выполняется.") 

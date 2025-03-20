@@ -201,9 +201,19 @@ def publish_cargo(cargo_data):
 def update_cargo(cargo_data):
     """Обновляет заявку груза на ATI"""
     
-    if not cargo_data["cargo_id"]:
-        print(f"❌ Ошибка: У груза {cargo_data['external_id']} нет cargo_id, обновление невозможно.")
-        return {"error": "cargo_id отсутствует, обновление невозможно"}
+    try:
+        if not cargo_data["cargo_id"]:
+            raise KeyError("cargo_id")  # Если cargo_id отсутствует, груз не найден на ATI
+    except KeyError:
+        print(f"⚠️ Груз {cargo_data['external_id']} не найден в ATI. Очищаем `cargo_id` и `is_published`.")
+        # Очистка данных в БД
+        order = session.query(Order).filter(Order.external_no == cargo_data["external_id"]).first()
+        if order:
+            order.cargo_id = None
+            order.is_published = False
+            session.commit()
+        # Возвращаем словарь с сообщением вместо None
+        return {"message": f"Груз {cargo_data['external_id']} не найден в ATI. Данные обновлены в БД."}
 
     url = f"{ATI_API_BASE_URL}/v2/cargos/{cargo_data['cargo_id']}"
 
@@ -279,39 +289,40 @@ def update_cargo(cargo_data):
     }
 
     response = requests.put(url, json=payload, headers=HEADERS)
-
     if response.status_code == 200:
         print(f"✅ Груз {cargo_data['cargo_id']} ({cargo_data['external_id']}) обновлен успешно!")
         return response.json()
-
     elif response.status_code == 429:
-        print(f"⚠️ Ошибка 429. Превышен суточный лимит запросов (5000) для контакта. Дальнейшие запросы невозможны в течение 24 часов.")
-        return {"error": "Превышен суточный лимит запросов (5000) для контакта"}
-
+        print(f"⚠️ Ошибка 429. Превышен лимит запросов.")
+        return {"error": "Превышен лимит запросов"}
     else:
         print(f"❌ Ошибка обновления {cargo_data['cargo_id']}: {response.status_code}, {response.text}")
         return response.json()
 
 def delete_cargo(order):
-    """Удаляет заявку груза на ATI"""
+    """Удаляет заявку груза на ATI и обновляет БД"""
+    
     if not order.cargo_id:
-        print(f"❌ Ошибка: У заявки {order.external_no} нет cargo_id, удаление невозможно.")
+        print(f"⚠️ Ошибка: У заявки {order.external_no} нет cargo_id, удаление невозможно.")
         return {"error": "cargo_id отсутствует, удаление невозможно"}
 
     url = f"{ATI_API_BASE_URL}/v1.0/loads/{order.cargo_id}"
-
     response = requests.delete(url, headers=HEADERS)
 
     if response.status_code == 200:
         print(f"✅ Груз {order.cargo_id} ({order.external_no}) удален успешно!")
 
-        # Обновляем БД
+        # 🔄 **Обновляем БД: очищаем cargo_id и is_published**
         db = SessionLocal()
         order_in_db = db.query(Order).filter(Order.external_no == order.external_no).first()
         if order_in_db:
             order_in_db.cargo_id = None
-            order_in_db.is_published = None
+            order_in_db.is_published = False  # ❌ Ранее стояло `None`, теперь `False`, чтобы явно показать, что груз больше не опубликован
             db.commit()
+            print(f"🔄 Заявка {order.external_no} обновлена в БД: cargo_id очищен, is_published=False")
+        else:
+            print(f"⚠️ Предупреждение: Заявка {order.external_no} не найдена в БД при удалении.")
+        
         db.close()
 
         return response.json()

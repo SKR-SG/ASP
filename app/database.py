@@ -12,7 +12,7 @@ load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
 # Создаем движок SQLAlchemy
-engine = create_engine(DATABASE_URL, echo=True)
+engine = create_engine(DATABASE_URL, echo=False)
 
 # Создаем сессию
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

@@ -6,10 +6,10 @@ from app.database import SessionLocal
 db = SessionLocal()
 
 # Выбираем тестовую заявку из БД
-selected_order = db.query(Order).filter(Order.external_no == "ТН0001212285").first()
+selected_order = db.query(Order).filter(Order.external_no == "ТН0001212655").first()
 
 if not selected_order or not selected_order.cargo_id:
-    print("❌ Ошибка: заявка ТН0001212285 не найдена в БД или не опубликована в ATI!")
+    print("❌ Ошибка: заявка ТН0001212655 не найдена в БД или не опубликована в ATI!")
     db.close()
     exit()
 

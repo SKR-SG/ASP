@@ -4,7 +4,8 @@ from app.models import Logist, DistributionRule
 def distribute_order(order, session: Session):
     """Применяет правила распределения и возвращает логиста и расчетную цену."""
     
-    rules = session.query(DistributionRule).all()
+    # Фильтруем правила по площадке
+    rules = session.query(DistributionRule).filter(DistributionRule.platform == order["platform"]).all()
     
     for rule in rules:
         # Проверяем соответствие города загрузки и выгрузки

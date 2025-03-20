@@ -135,7 +135,7 @@ def prepare_order_for_ati(order):
 
     # 🆕 Исправленный `payment`
     if ati_price:
-        rate_without_nds = round(ati_price / 1.2, 2)  # Убираем 20% НДС
+        rate_without_nds = math.floor(ati_price / 1.2 / 100) * 100  # Убираем 20% НДС
 
         payment = {
             "type": "without-bargaining",
@@ -168,10 +168,11 @@ def prepare_order_for_ati(order):
 
     return {
         "external_id": order.external_no,
+        "cargo_id": order.cargo_id,  # Новая строка – теперь cargo_id берется из заказа
         "loading_city_id": loading_city_id,
         "unloading_city_id": unloading_city_id,
-        "loading_address": "",
-        "unloading_address": order.address or "",
+        "loading_address": order.loading_address or"",
+        "unloading_address": order.unloading_address or "",
         "cargo_name": order.cargo_name or "Груз",
         "weight": weight,
         "volume": volume,

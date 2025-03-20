@@ -12,11 +12,10 @@ sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 load_dotenv()
 
 # Импортируем базу данных и модели
-from app.database import Base
-from app.models import metadata  # Импортируем метаданные
+from app.models import Base
 
 # Берем метаданные из моделей
-target_metadata = metadata
+target_metadata = Base.metadata # Используем metadata напрямую из Base
 
 # Загружаем конфиг Alembic
 config = context.config

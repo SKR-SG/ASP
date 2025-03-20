@@ -7,18 +7,10 @@ from app.database import SessionLocal
 db = SessionLocal()
 
 # Выбираем тестовую заявку из БД
-selected_order = db.query(Order).filter(Order.external_no == "ТН0001212285").first()
-
-if not selected_order or not selected_order.cargo_id:
-    print("❌ Ошибка: заявка ТН0001212285 не найдена в БД или не опубликована в ATI!")
-    db.close()
-    exit()
+selected_order = db.query(Order).filter(Order.external_no == "ТН0001212655").first()
 
 # 🔄 Преобразуем `order` в `cargo_data`, как в `publish_cargo()`
 cargo_data = prepare_order_for_ati(selected_order)
-
-# 🔄 Добавляем `cargo_id`, так как `prepare_order_for_ati()` его не заполняет
-cargo_data["cargo_id"] = selected_order.cargo_id
 
 print("DEBUG cargo_data:", cargo_data)
 
